@@ -1,0 +1,9 @@
+# created by virtualenv automatically
+
+/bin/
+/lib/
+/src/__pycache__/api.cpython-310.pyc
+/pyvenv.cfg
+/CACHEDIR.TAG
+/src/.env
+/app/__pycache__/
