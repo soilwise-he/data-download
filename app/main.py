@@ -7,9 +7,7 @@ from typing import List, Any, Dict, Optional, Union
 import httpx
 import pandas as pd
 from io import BytesIO, StringIO
-import csv
-import json
-import traceback
+import csv, os
 from rdflib import Graph, Namespace, BNode, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, SKOS, DCTERMS
 import sqlite3, sys
@@ -23,9 +21,12 @@ GEO  = Namespace("http://www.opengis.net/ont/geosparql#")
 WGS  = Namespace("http://www.w3.org/2003/01/geo/wgs84_pos#")
 QUDT = Namespace("http://qudt.org/schema/qudt/")
 
+rootpath = os.environ.get("ROOTPATH") or "/"
 
 
-app = FastAPI(title="DataStreamer")
+app = FastAPI(title="DataStreamer"    
+              description="REST API for harmonized data downloads",
+              root_path=rootpath)
 
 # DEV: permissive CORS for local testing. Lock this down in production.
 app.add_middleware(

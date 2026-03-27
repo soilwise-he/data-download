@@ -1,13 +1,12 @@
 
-FROM harbor.containers.wurnet.nl/proxy-cache/library/python:3.10.18-slim-bookworm
+FROM python:3.14-slim-trixie
 LABEL maintainer="genuchten@yahoo.com"
 
 RUN apt-get update && apt-get install --yes \
-        ca-certificates libexpat1 \
+        ca-certificates libexpat1 git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN adduser --uid 1000 --gecos '' --disabled-password sds
-
 
 ENV ROOTPATH=/
 ENV POSTGRES_HOST=host.docker.internal
