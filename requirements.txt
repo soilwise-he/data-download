@@ -5,3 +5,4 @@ pandas
 openpyxl
 python-dateutil
 rdflib
+git+https://github.com/pvgenuchten/csvwlib.git@latest

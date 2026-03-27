@@ -1,6 +1,6 @@
 # app/main.py
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Any, Dict, Optional, Union
@@ -15,6 +15,7 @@ from rdflib.namespace import RDF, RDFS, XSD, SKOS, DCTERMS
 import sqlite3, sys
 import shutil, hashlib, random
 from datetime import datetime
+from csvwlib import CSVWConverter
 
 # Namespaces
 SOSA = Namespace("http://www.w3.org/ns/sosa/")
@@ -37,6 +38,15 @@ app.add_middleware(
 
 class URLRequest(BaseModel):
     url: str
+
+class JsonLdPayload(BaseModel):
+    MetadataContent: Any
+
+class ConvertRequest(BaseModel):
+    url: str
+    context: Optional[Union[dict, str]] = None  # JSON object or URL string
+    output_format: Optional[str] = "ttl"        # 'ttl', 'rdfxml', 'json-ld'
+    filters: Optional[Dict[str, Any]] = None    # { columnName: value, ... }
 
 # -----------------------
 # Utilities
@@ -123,7 +133,7 @@ def guess_type_from_samples(values: List[Any]) -> str:
         non_empty += 1
         # numeric?
         try:
-            ff = float(s.replace(",", "."))  # allow commas -> decimals
+            ff = float(s.replace(",", "."))
             if pd.notna(ff):
                 num_count += 1
                 continue
@@ -288,105 +298,229 @@ async def parse_excel_or_csv_from_url(url: str) -> List[Dict]:
         })
     return results
 
-# -----------------------
-# API endpoints
-# -----------------------
-@app.post("/extract-csvs")
-async def extract_csvs(req: URLRequest):
+# Helper: safe filename from URL or fallback
+def safe_name_from_url(url: str, fallback: str) -> str:
+    try:
+        parsed = urlparse(url)
+        name = parsed.path.split("/")[-1] or parsed.netloc or fallback
+        # remove fragments and query parts if present
+        name = name.split("#")[0].split("?")[0]
+        if not name:
+            return fallback
+        return name
+    except Exception:
+        return fallback
+
+# Helper: build CSV text from header list + (optional) rows (rows as list of dicts)
+def build_csv_text_from_rows(headers: List[str], rows: Optional[List[Dict[str, Any]]] = None) -> str:
+    output = BytesIO()
+    # write text through TextIOWrapper to support newline handling in zip
+    text_wr = TextIOWrapper(output, encoding="utf-8", newline="")
+    writer = csv.writer(text_wr, quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(headers)
+    if rows:
+        for r in rows:
+            row = [ (r.get(h) if isinstance(r, dict) else '') for h in headers ]
+            writer.writerow(row)
+    text_wr.flush()
+    result = output.getvalue().decode("utf-8")
+    output.close()
+    return result
+
+# Async fetch helper with timeout and basic heuristics
+async def fetch_text(client: httpx.AsyncClient, url: str, timeout: float = 10.0) -> Optional[str]:
+    try:
+        resp = await client.get(url, timeout=timeout)
+        resp.raise_for_status()
+        # try to decode as text
+        ct = resp.headers.get("content-type", "")
+        # treat as text if content-type mentions text or csv or json
+        if "text" in ct or "csv" in ct or "json" in ct or ct == "" or "application/octet-stream" in ct:
+            # prefer resp.text which decodes according to charset
+            return resp.text
+        # otherwise try to decode with utf-8 fallback
+        return resp.content.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+@app.post("/download_csv")
+async def download_csv(req: URLRequest):
     """
-    Fetch a URL (Excel or CSV) and return a list of csv-like objects (one per sheet or one for CSV).
+    Accepts JSON body with { "MetadataContent": <object|json-string> }
+    Produces a ZIP with:
+      - one CSV file per table (try fetch table.url, else generate from tableSchema.columns headers)
+      - metadata.jsonld (the metadataPayload as JSON)
     """
     url = req.url
-    try:
-        tables = await parse_excel_or_csv_from_url(url)
-        return {"success": True, "tables": tables}
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {str(e)}")
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+    tables = await parse_excel_or_csv_from_url(url)
+        
+    # Prepare async http client
+    async with httpx.AsyncClient() as client:
+        zip_buf = BytesIO()
+        # create zip in-memory
+        import zipfile
+        with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # add a pretty-printed metadata JSON-LD file
+            #try:
+            #    metadata_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
+            #except Exception:
+            #    metadata_bytes = str(metadata).encode("utf-8")
+            #zf.writestr("metadata.jsonld", metadata_bytes)
 
-@app.post("/extract-headers")
+            # iterate tables and produce CSV per table
+            for idx, tbl in enumerate(tables):
+                # table can be a simple string or an object
+                # prefer tbl['url'] if available; allow url to be list or string
+                tbl_url = None
+                if isinstance(tbl, str):
+                    tbl_url = tbl
+                elif isinstance(tbl, dict):
+                    u = tbl.get("url")
+                    if isinstance(u, list) and len(u) > 0:
+                        tbl_url = u[0]
+                    else:
+                        tbl_url = u
+                # fallback name
+                base = f"table_{idx+1}"
+                filename_hint = safe_name_from_url(str(tbl_url) if tbl_url else "", base)
+                csv_filename = filename_hint
+                # ensure extension .csv
+                if not csv_filename.lower().endswith(".csv"):
+                    csv_filename = csv_filename + ".csv"
+
+                # Attempt to fetch the CSV at tbl_url
+                got_text = None
+                if tbl_url:
+                    got_text = await fetch_text(client, tbl_url)
+
+                if got_text:
+                    # if the remote resource looks like CSV already, use it
+                    # But if remote is JSON or other, we still include the text as .csv (user can inspect)
+                    zf.writestr(csv_filename, got_text.encode("utf-8"))
+                else:
+                    # no remote data — try to generate CSV header from tableSchema.columns
+                    headers = []
+                    rows = None
+                    if isinstance(tbl, dict):
+                        ts = tbl.get("tableSchema") or {}
+                        cols = ts.get("columns") if ts else None
+                        if isinstance(cols, list):
+                            # columns may be objects with titles/name; try to get 'name' or 'titles'
+                            hdrs = []
+                            for c in cols:
+                                if isinstance(c, dict):
+                                    # titles can be string or array; handle both
+                                    t = c.get("name") or c.get("titles") or c.get("title")
+                                    if isinstance(t, list) and len(t) > 0:
+                                        hdrs.append(str(t[0]))
+                                    elif t is not None:
+                                        hdrs.append(str(t))
+                                    else:
+                                        # fallback: propertyUrl or blank
+                                        hdrs.append(c.get("propertyUrl") or "")
+                                else:
+                                    # if column is a string
+                                    hdrs.append(str(c))
+                            headers = [h if h is not None else "" for h in hdrs]
+                        else:
+                            headers = []
+                    else:
+                        headers = []
+
+                    if not headers:
+                        # fallback to single column with table name
+                        headers = [filename_hint.replace(".csv", "")]
+
+                    csv_text = build_csv_text_from_rows(headers, rows)
+                    zf.writestr(csv_filename, csv_text.encode("utf-8"))
+
+        # finalize zip buffer
+        zip_buf.seek(0)
+        # StreamingResponse is fine for in-memory buffer
+        headers = {
+            "Content-Disposition": 'attachment; filename="csvw_tables.zip"'
+        }
+        return StreamingResponse(zip_buf, media_type="application/zip", headers=headers)
+
 async def extract_headers(req: URLRequest):
     """
-    Fetch URL, parse sheets/files and build a CSVW metadata (JSON-LD) using tables[] with guessed columns/datatype/primaryKey.
+    build a CSVW metadata (JSON-LD) using tables[] with guessed columns/datatype/primaryKey.
     """
     url = req.url
-    try:
-        tables = await parse_excel_or_csv_from_url(url)
-        # Build CSVW tables[] array
-        csvw_tables = []
-        all_headers = []
-        for t in tables:
-            headers = t.get("headers", []) or []
-            rows = t.get("rows", []) or []
-            # sample for types: first up to 5 rows
-            sample_for_types = rows[:5]
-            # sample for uniqueness for primary key: up to 200 rows
-            sample_for_uniqueness = rows[:200]
-            # build columns
-            columns = []
-            for h in headers:
-                samples = [r.get(h, "") for r in sample_for_types]
-                guessed = guess_type_from_samples(samples)
-                datatype = None
-                if guessed == "number":
-                    datatype = "http://www.w3.org/2001/XMLSchema#decimal"
-                if guessed == "date":
-                    datatype = "http://www.w3.org/2001/XMLSchema#dateTime"
-                prop = "schema:value"
-                # small mapping for common names
-                keyLower = h.lower() if isinstance(h, str) else ""
-                if "name" == keyLower or keyLower.endswith("name"):
-                    prop = "schema:name"
-                elif "email" in keyLower:
-                    prop = "schema:email"
-                elif keyLower in ("id","identifier","uuid"):
-                    prop = "schema:identifier"
-                columns.append({
-                    "titles": h,
-                    "name": h,
-                    "dcterms:description": h,
-                    "propertyUrl": prop,
-                    **({"datatype": datatype} if datatype else {})
-                })
-            # guess primaryKey
-            pk = pick_primary_key(headers, sample_for_uniqueness)
-            table = {
-                "url": t.get("url"),
-                "tableSchema": {
-                    "columns": columns
-                }
+
+    tables = await parse_excel_or_csv_from_url(url)
+    # Build CSVW tables[] array
+    csvw_tables = []
+    all_headers = []
+    for t in tables:
+        headers = t.get("headers", []) or []
+        rows = t.get("rows", []) or []
+        # sample for types: first up to 5 rows
+        sample_for_types = rows[:5]
+        # sample for uniqueness for primary key: up to 200 rows
+        sample_for_uniqueness = rows[:200]
+        # build columns
+        columns = []
+        for h in headers:
+            samples = [r.get(h, "") for r in sample_for_types]
+            guessed = guess_type_from_samples(samples)
+            datatype = None
+            if guessed == "number":
+                datatype = "http://www.w3.org/2001/XMLSchema#decimal"
+            if guessed == "date":
+                datatype = "http://www.w3.org/2001/XMLSchema#dateTime"
+            prop = "schema:value"
+            # small mapping for common names
+            keyLower = h.lower() if isinstance(h, str) else ""
+            if "name" == keyLower or keyLower.endswith("name"):
+                prop = "schema:name"
+            elif "email" in keyLower:
+                prop = "schema:email"
+            elif keyLower in ("id","identifier","uuid"):
+                prop = "schema:identifier"
+            columns.append({
+                "titles": h,
+                "name": h,
+                "dcterms:description": h,
+                "propertyUrl": prop,
+                **({"datatype": datatype} if datatype else {})
+            })
+        # guess primaryKey
+        pk = pick_primary_key(headers, sample_for_uniqueness)
+        table = {
+            "url": t.get("url"),
+            "tableSchema": {
+                "columns": columns
             }
-            if pk:
-                table["tableSchema"]["primaryKey"] = pk
-            csvw_tables.append(table)
-            for h in headers:
-                if h not in all_headers:
-                    all_headers.append(h)
-        # build compact context mapping for readability
-        context_map = {"@vocab": "http://example.org/vocab#"}
-        for h in all_headers:
-            token = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(h))
-            context_map[h] = f"http://example.org/vocab#{token}"
-        metadata = {
-            "@context": ["https://www.w3.org/ns/csvw.jsonld", context_map],
-            "tables": csvw_tables
         }
-        return {"success": True, "metadata": metadata, "tables": tables}
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {str(e)}")
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+        if pk:
+            table["tableSchema"]["primaryKey"] = pk
+        csvw_tables.append(table)
+        for h in headers:
+            if h not in all_headers:
+                all_headers.append(h)
+    # build compact context mapping for readability
+    #context_map = {"@vocab": "http://example.org/vocab#"}
+    #for h in all_headers:
+    #    token = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(h))
+    #    context_map[h] = f"http://example.org/vocab#{token}"
+    metadata = {
+        "@context": ["https://www.w3.org/ns/csvw.jsonld", context_map],
+        "tables": csvw_tables
+    }
+    return {"metadata": metadata, "tables": tables}
 
 
 
-class ConvertRequest(BaseModel):
-    url: str
-    context: Optional[Union[dict, str]] = None  # JSON object or URL string
-    output_format: Optional[str] = "ttl"        # 'ttl', 'rdfxml', 'json-ld'
-    filters: Optional[Dict[str, Any]] = None    # { columnName: value, ... }
+
+
+@app.post('/table/export')
+async def csvw(payload: JsonLdPayload):
+    graph = CSVWConverter.to_rdf(None, payload.MetadataContent, mode='standard')
+    if graph:
+        return JSONResponse(content=graph.serialize(format='json-ld'))
+    else:
+        print('no graph found')
 
 @app.post("/convert")
 async def convert_to_rdf(req: ConvertRequest = Body(...)):
@@ -399,217 +533,39 @@ async def convert_to_rdf(req: ConvertRequest = Body(...)):
     fmt = (req.output_format or "ttl").lower()
     filters = req.filters or {}
 
-    if fmt not in ("ttl", "rdfxml", "json-ld", "sqlite"):
+    if fmt in ("ttl", "rdfxml", "json-ld"):
         raise HTTPException(status_code=400, detail="output_format must be one of: ttl, rdfxml, json-ld")
 
     # 1) parse excel/csv into tables
     try:
-        tables = await parse_excel_or_csv_from_url(url)
+        tabular_data = await extract_headers(url)
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Parsing error: {str(e)}")
 
-    # 2) build csvw tables[] (reuse logic from extract_headers)
-    csvw_tables = []
-    all_headers = []
-    for t in tables:
-        headers = t.get("headers", []) or []
-        rows = t.get("rows", []) or []
-        sample_for_types = rows[:5]
-        sample_for_uniqueness = rows[:200]
-
-        columns = []
-        for h in headers:
-            samples = [r.get(h, "") for r in sample_for_types]
-            guessed = guess_type_from_samples(samples)
-            datatype = None
-            if guessed == "number":
-                datatype = "http://www.w3.org/2001/XMLSchema#decimal"
-            if guessed == "date":
-                datatype = "http://www.w3.org/2001/XMLSchema#dateTime"
-            prop = "schema:value"
-            keyLower = str(h).lower() if isinstance(h, str) else ""
-            if keyLower == "name" or keyLower.endswith("name"):
-                prop = "schema:name"
-            elif "email" in keyLower:
-                prop = "schema:email"
-            elif keyLower in ("id", "identifier", "uuid"):
-                prop = "schema:identifier"
-
-            col = {
-                "titles": h,
-                "name": h,
-                "dcterms:description": h,
-                "propertyUrl": prop
-            }
-            if datatype:
-                col["datatype"] = datatype
-            columns.append(col)
-
-        pk = pick_primary_key(headers, sample_for_uniqueness)
-        table_obj = {
-            "url": t.get("url"),
-            "tableSchema": {
-                "columns": columns
-            }
-        }
-        if pk:
-            table_obj["tableSchema"]["primaryKey"] = pk
-
-        csvw_tables.append(table_obj)
-        for h in headers:
-            if h not in all_headers:
-                all_headers.append(h)
-
-    # 3) resolve / fetch context if it's a URL, otherwise use given object; otherwise build a compact local context
-    resolved_context = None
-    if isinstance(context_input, str) and context_input:
-        # try to fetch the context URL (may be a JSON-LD document)
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.get(context_input)
-                r.raise_for_status()
-                # attempt to parse JSON
-                try:
-                    resolved_context = r.json()
-                except Exception:
-                    # fallback: treat as URL reference
-                    resolved_context = context_input
-        except Exception:
-            # if fetching fails, leave as URL string so CSVW tools may dereference it later
-            resolved_context = context_input
-    elif isinstance(context_input, dict):
-        resolved_context = context_input
-    else:
-        # build a minimal readable context mapping discovered headers to an example vocab
-        ctx_map = {"@vocab": "http://example.org/vocab#"}
-        for h in all_headers:
-            token = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(h))
-            ctx_map[h] = f"http://example.org/vocab#{token}"
-        # include the official csvw JSON-LD context so processors understand CSVW terms
-        resolved_context = ["https://www.w3.org/ns/csvw.jsonld", ctx_map]
-
-    # 4) compose final metadata (we prefer to attach our generated tables[] to provided context)
-    if isinstance(resolved_context, dict) and "@context" in resolved_context and isinstance(resolved_context.get("tables"), list):
-        # user provided full metadata object; merge or replace tables
-        metadata_doc = resolved_context.copy()
-        metadata_doc["tables"] = csvw_tables
-    else:
-        metadata_doc = {
-            "@context": resolved_context,
-            "tables": csvw_tables
-        }
-
-    # 5) Apply filters to actual row data (simple equality filters) and prepare data rows used for conversion
-    def row_matches_filters(row):
-        for k, v in filters.items():
-            # If row lacks key -> no match
-            if k not in row:
-                return False
-            # compare as string (trim)
-            rv = "" if row.get(k) is None else str(row.get(k)).strip()
-            if str(v) != rv:
-                return False
-        return True
-
-    # attach filtered rows to tables for later use if needed
-    filtered_tables = []
-    for t, tmeta in zip(tables, csvw_tables):
-        rows = t.get("rows", []) or []
-        if filters:
-            rows = [r for r in rows if row_matches_filters(r)]
-        filtered_tables.append({
-            "meta": tmeta,
-            "rows": rows,
-            "headers": t.get("headers", []),
-            "url": t.get("url")
-        })
-
-    # 6) Try to use csvwlib if installed (preferred). If not available, fall back to internal conversion
-    use_csvwlib = False
-    csvwlib_err = None
-    try:
-        import csvwlib
-        use_csvwlib = True
-    except Exception as e:
-        use_csvwlib = False
-        csvwlib_err = str(e)
-
-    if use_csvwlib:
-        # Best-effort: csvwlib has higher-level functions to convert metadata+tables to an RDF dataset.
-        # The exact utilities differ between versions — attempt an idiomatic call and fall back if it fails.
-        try:
-            # The csvwlib API exposes a convert function in some versions. We'll attempt to call expected helpers.
-            # If csvwlib expects files/urls, pass metadata_doc (with 'tables' referencing remote URLs).
-            # NOTE: this block is best-effort; some csvwlib versions may require a different invocation.
-            try:
-                # try a convenient API if present
-                graph = csvwlib.to_graph(metadata_doc)  # ideal if available
-            except AttributeError:
-                # try convert -> graph or similar names
-                if hasattr(csvwlib, "convert"):
-                    graph = csvwlib.convert(metadata_doc)
-                elif hasattr(csvwlib, "CSVW"):
-                    graph = csvwlib.CSVW(metadata_doc).to_graph()
-                else:
-                    # unknown API — fall back to our internal conversion
-                    raise RuntimeError("csvwlib present but no known conversion entrypoint; falling back")
-            # if csvwlib produced an rdflib.Graph-like object, serialize
-            if isinstance(graph, Graph):
-                if fmt == "ttl":
-                    return Response(content=graph.serialize(format="turtle"), media_type="text/turtle")
-                if fmt == "rdfxml":
-                    return Response(content=graph.serialize(format="xml"), media_type="application/rdf+xml")
-                if fmt == "json-ld":
-                    return Response(content=graph.serialize(format="json-ld"), media_type="application/ld+json")
-            # if different object, try to get ttl/jsonld attributes
-            if hasattr(graph, "serialize"):
-                out = graph.serialize(format="turtle")
-                if fmt == "ttl":
-                    return Response(content=out, media_type="text/turtle")
-                if fmt == "rdfxml":
-                    return Response(content=graph.serialize(format="xml"), media_type="application/rdf+xml")
-                if fmt == "json-ld":
-                    return Response(content=graph.serialize(format="json-ld"), media_type="application/ld+json")
-            # otherwise fall back
-        except Exception as e:
-            # fall back to internal conversion below
-            csvwlib_err = f"csvwlib conversion failed: {e}"
-
-    # --- BEGIN: Enhanced SQLite export with SOSA mapping ---
-    if fmt == "sqlite":
-        import sqlite3, tempfile, os, uuid
-
-        db_path = rdf2rdb(g)
-        fname = os.path.basename(db_path)
-
-        headers = {"Content-Disposition": f'attachment; filename=\"{fname}\"'}
-        return FileResponse(path=db_path, filename=fname, media_type="application/x-sqlite3", headers=headers)
-
-
-
-    # 8) serialize graph in requested format
-    mime = "text/turtle"
-    out = ""
-    try:
+    # 2) convert data to graph
+    graph = CSVWConverter.to_rdf(None, tabular_data['metadata'], mode='standard')
+    
+    if isinstance(graph, Graph):
         if fmt == "ttl":
-            out = g.serialize(format="turtle")
-            mime = "text/turtle"
-        elif fmt == "rdfxml":
-            out = g.serialize(format="xml")
-            mime = "application/rdf+xml"
-        elif fmt == "json-ld":
-            # rdflib json-ld serializer will honor bound prefixes (may need additional context)
-            out = g.serialize(format="json-ld", indent=2)
-            mime = "application/ld+json"
-        else:
-            out = g.serialize(format="turtle")
-            mime = "text/turtle"
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Serialization failed: {e}")
+            return Response(content=graph.serialize(format="turtle"), media_type="text/turtle")
+        if fmt == "rdfxml":
+            return Response(content=graph.serialize(format="xml"), media_type="application/rdf+xml")
+        if fmt == "json-ld":
+            return Response(content=graph.serialize(format="json-ld"), media_type="application/ld+json")
+        # --- BEGIN: Enhanced SQLite export with SOSA mapping ---
+        if fmt == "sqlite":
+            import sqlite3, tempfile, os, uuid
 
-    return Response(content=out, media_type=mime)
+            db_path = rdf2rdb(g)
+            fname = os.path.basename(db_path)
+
+            headers = {"Content-Disposition": f'attachment; filename=\"{fname}\"'}
+            return FileResponse(path=db_path, filename=fname, media_type="application/x-sqlite3", headers=headers)
+        
+    else:
+        raise HTTPException(status_code=500, detail=f"Parsing error")
 
 
 # optional health endpoint
@@ -692,7 +648,7 @@ def types_text_for(g, node):
     return ",".join(names)
 
 # utility upsert functions returning row id
-def upsert_single_return_id(table, uri, label=None, extra_col=None, extra_val=None):
+def upsert_single_return_id(cur, table, uri, label=None, extra_col=None, extra_val=None):
     """
     Generic insert-or-ignore then select id. If extra_col/extra_val provided, include in insert.
     """
@@ -769,10 +725,10 @@ def rdf2rdb(g, RDF_FORMAT='turtle'): # "xml", "nt", "json-ld" etc.
                 # geom_text = get_geometry_text(g, foi_node) if foi_node is not None else None
 
                 # Upsert referenced entities and get ids
-                proc_id = upsert_single_return_id("procedure", proc_uri, proc_label)
-                unit_id = upsert_single_return_id("unitofmeasure", unit_uri, unit_label)
-                prop_id = upsert_single_return_id("property", prop_uri, prop_label)
-                foi_id = upsert_single_return_id("feature_of_interest", foi_uri, foi_type)
+                proc_id = upsert_single_return_id(cur,"procedure", proc_uri, proc_label)
+                unit_id = upsert_single_return_id(cur,"unitofmeasure", unit_uri, unit_label)
+                prop_id = upsert_single_return_id(cur,"property", prop_uri, prop_label)
+                foi_id = upsert_single_return_id(cur,"feature_of_interest", foi_uri, foi_type)
                 if qual_value_text not in [None, '']:
                     UPSERT_RES = f"INSERT INTO result (result_uri,value,unit_of_measure_id) VALUES (?, ?, ?)"
                     cur.execute(UPSERT_RES,(qual_uri,qual_value_text,unit_id))
