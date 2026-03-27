@@ -24,7 +24,7 @@ QUDT = Namespace("http://qudt.org/schema/qudt/")
 rootpath = os.environ.get("ROOTPATH") or "/"
 
 
-app = FastAPI(title="DataStreamer"    
+app = FastAPI(title="DataStreamer",    
               description="REST API for harmonized data downloads",
               root_path=rootpath)
 

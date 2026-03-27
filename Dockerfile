@@ -37,4 +37,4 @@ EXPOSE 8000
 
 USER sds
 
-ENTRYPOINT [ "python3", "-m", "uvicorn", "api:app", "--reload", "--host", "0.0.0.0", "--port", "8000" ]
+ENTRYPOINT [ "python3", "-m", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000" ]
