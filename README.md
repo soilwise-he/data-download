@@ -7,6 +7,18 @@ can be converted through this service as rdf (ttl, xml, json-ld) or Geopackage (
 
 The metadata can live with the data in repositories (suc as zenodo.org), or be made available elsewhere.
 
+## API methods
+
+**convert**: converts one or more tables to a knowledge graph, from a csvw configuration
+
+**suggest**: suggests a csvw configuration from one or more tables
+
+**export**: exports the tables and csvw configuration of a project as a zipfile
+
+
+
+
+
 ## Run in a local python environment
 
 ```
@@ -26,6 +38,13 @@ docker run -p8000:8000 ghcr.io//soilwise-he/data-download:latest
 
 This service does not need data storage (users download the results directly). 
 However you can enable storage of metadata on a database, provide postgres connection details via env variables
+
+## Run tests
+
+```
+pip install -r requirements.txt
+pytest test
+```
 
 ## Soilwise HE project
 

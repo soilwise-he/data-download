@@ -8,3 +8,5 @@
 /src/.env
 /app/__pycache__/
 /app/.env
+/.pytest_cache/
+/tests/__pycache__/

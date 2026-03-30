@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse, Response, JSONResponse, StreamingRes
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Any, Dict, Optional, Union
-import httpx
+import httpx, json, io
 import pandas as pd
 from io import BytesIO, StringIO
 import csv, os
@@ -24,9 +24,16 @@ QUDT = Namespace("http://qudt.org/schema/qudt/")
 rootpath = os.environ.get("ROOTPATH") or "/"
 
 
-app = FastAPI(title="DataStreamer",    
-              description="REST API for harmonized data downloads",
-              root_path=rootpath)
+app = FastAPI(    
+    title="Soil Observation Data Annotation with CSVW",
+    description="""
+API for converting soil observation data into RDF and SQLite formats.
+
+### Features
+- Convert CSVW to RDFor SQLITE
+- Export full project
+- Suggest a CSVW configuration
+""", root_path=rootpath)
 
 # DEV: permissive CORS for local testing. Lock this down in production.
 app.add_middleware(
@@ -44,16 +51,16 @@ class JsonLdPayload(BaseModel):
     MetadataContent: Any
 
 class ConvertRequest(BaseModel):
-    url: str
-    context: Optional[Union[dict, str]] = None  # JSON object or URL string
+    context: Union[dict, str]  # JSON object or URL string
+    data: Optional[list[str]] = [] 
     output_format: Optional[str] = "ttl"        # 'ttl', 'rdfxml', 'json-ld'
-    filters: Optional[Dict[str, Any]] = None    # { columnName: value, ... }
+
 
 # -----------------------
 # Utilities
 # -----------------------
 async def fetch_bytes(url: str, timeout: int = 30) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         r = await client.get(url)
         r.raise_for_status()
         return r.content
@@ -344,8 +351,12 @@ async def fetch_text(client: httpx.AsyncClient, url: str, timeout: float = 10.0)
     except Exception:
         return None
 
-@app.post("/download_csv")
-async def download_csv(req: URLRequest):
+@app.post("/export", summary="Exports a CSVW project (tables and configuration) as a zip",
+    description="""Accepts JSON body with { "MetadataContent": <object|json-string> }
+    Produces a ZIP with:
+      - one CSV file per table (try fetch table.url, else generate from tableSchema.columns headers)
+      - metadata.jsonld (the metadataPayload as JSON)""")
+async def export(req: URLRequest):
     """
     Accepts JSON body with { "MetadataContent": <object|json-string> }
     Produces a ZIP with:
@@ -443,9 +454,12 @@ async def download_csv(req: URLRequest):
         }
         return StreamingResponse(zip_buf, media_type="application/zip", headers=headers)
 
-async def extract_headers(req: URLRequest):
+@app.post("/suggest", summary="Suggest a CSVW configuration",
+    description="""Suggest a CSVW configuration or a given tableor excel""" )
+async def suggest(req: URLRequest):
     """
-    build a CSVW metadata (JSON-LD) using tables[] with guessed columns/datatype/primaryKey.
+    build a CSVW metadata (JSON-LD) using tables[] with 
+    guessed columns/datatype/primaryKey.
     """
     url = req.url
 
@@ -512,67 +526,64 @@ async def extract_headers(req: URLRequest):
     return {"metadata": metadata, "tables": tables}
 
 
-
-
-
-@app.post('/table/export')
-async def csvw(payload: JsonLdPayload):
-    graph = CSVWConverter.to_rdf(None, payload.MetadataContent, mode='standard')
-    if graph:
-        return JSONResponse(content=graph.serialize(format='json-ld'))
-    else:
-        print('no graph found')
-
-@app.post("/convert")
+@app.post("/convert", summary="Converts one or more tables to a knowledge graph, from a csvw configuration",
+    description="""converts one or more tables to a knowledge graph, from a csvw configuration""")
 async def convert_to_rdf(req: ConvertRequest = Body(...)):
     """
     Convert workbook or CSV at `url` to RDF using provided CSV-W context (object or URL).
     Returns a string with the chosen serialization.
     """
-    url = req.url
+    data = req.data
     context_input = req.context
     fmt = (req.output_format or "ttl").lower()
-    filters = req.filters or {}
 
-    if fmt in ("ttl", "rdfxml", "json-ld"):
-        raise HTTPException(status_code=400, detail="output_format must be one of: ttl, rdfxml, json-ld")
 
-    # 1) parse excel/csv into tables
-    try:
-        tabular_data = await extract_headers(url)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Parsing error: {str(e)}")
+    allowed_formats = "ttl,rdfxml,json-ld,sqlite,gpkg".split(',')
+
+    if fmt not in allowed_formats:
+        raise HTTPException(status_code=400, detail=f"Output_format must be one of: {', '.join(allowed_formats)}")
+
+    # 0) get context
+    if isinstance(context_input, str):
+        content = await fetch_bytes(context_input)
+        context_input = json.loads(content.decode("utf-8", errors="replace"))
+
+    # 1) if url is none, fetch from context
+    if not data or len(data) == 0:
+        data = []
+        for t in context_input.get('tables',[]):
+            if t.get('url'):
+                data.append(t.get('url'))
 
     # 2) convert data to graph
-    graph = CSVWConverter.to_rdf(None, tabular_data['metadata'], mode='standard')
+    graph = CSVWConverter.to_rdf(next(iter(data),None), 
+                                 context_input, 
+                                 mode='minimal')
     
     if isinstance(graph, Graph):
         if fmt == "ttl":
-            return Response(content=graph.serialize(format="turtle"), media_type="text/turtle")
+            return Response(content=graph.serialize(format="turtle"), 
+                            media_type="text/turtle")
         if fmt == "rdfxml":
-            return Response(content=graph.serialize(format="xml"), media_type="application/rdf+xml")
+            return Response(content=graph.serialize(format="xml"), 
+                            media_type="application/rdf+xml")
         if fmt == "json-ld":
-            return Response(content=graph.serialize(format="json-ld"), media_type="application/ld+json")
+            return Response(content=graph.serialize(format="json-ld"), 
+                            media_type="application/ld+json")
         # --- BEGIN: Enhanced SQLite export with SOSA mapping ---
-        if fmt == "sqlite":
-            import sqlite3, tempfile, os, uuid
+        if fmt == "sqlite" or fmt == "gpkg":
+            db = rdf2rdb(graph)
+            db_bytes = io.BytesIO()
+            for line in db.iterdump():  # iterdump gives SQL statements to recreate DB
+                db_bytes.write(f"{line}\n".encode())
+            db.close()
+            db_bytes.seek(0)
 
-            db_path = rdf2rdb(g)
-            fname = os.path.basename(db_path)
-
-            headers = {"Content-Disposition": f'attachment; filename=\"{fname}\"'}
-            return FileResponse(path=db_path, filename=fname, media_type="application/x-sqlite3", headers=headers)
-        
+            return Response(content=db_bytes.getvalue(), media_type="application/sqlite",
+                            headers={"Content-Disposition": "attachment; filename=export.db"})
     else:
         raise HTTPException(status_code=500, detail=f"Parsing error")
 
-
-# optional health endpoint
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
 # ---- Helpers ----
 def bn_to_urn(node):
@@ -664,89 +675,139 @@ def upsert_single_return_id(cur, table, uri, label=None, extra_col=None, extra_v
     row = cur.fetchone()
     return row[0] if row else None
 
+def dbinit():
+    # Create an in-memory SQLite database
+    conn = sqlite3.connect(":memory:")
+    cur = conn.cursor()
+
+    # -----------------------------
+    # 1. Create tables
+    # -----------------------------
+    cur.execute("""
+    CREATE TABLE result (
+        result_uri TEXT PRIMARY KEY,
+        value REAL,
+        unit_of_measure_id TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE observation (
+        observation_uri TEXT PRIMARY KEY,
+        result_uri TEXT,
+        phenomenon_time TEXT,
+        procedure_id TEXT,
+        property_id TEXT,
+        foi_id TEXT,
+        FOREIGN KEY(result_uri) REFERENCES result(result_uri)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE procedure (
+        uri TEXT PRIMARY KEY,
+        label TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE unitofmeasure (
+        uri TEXT PRIMARY KEY,
+        label TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE property (
+        uri TEXT PRIMARY KEY,
+        label TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE feature_of_interest (
+        uri TEXT PRIMARY KEY,
+        label TEXT
+    )
+    """)
+    return conn
 
 # get sqlite for rdf
 def rdf2rdb(g, RDF_FORMAT='turtle'): # "xml", "nt", "json-ld" etc.
-    random.seed(10)
+    
+    conn = dbinit()
+    cur = conn.cursor()
+    if 1==1: # try:
+        # iterate over explicit observation subjects
+        obs_count = 0
+        for obs in g.subjects(RDF.type, SOSA.Observation):
+            obs_count += 1
+            obs_uri = node_to_uri(obs)
+            # Phenomenon time (literal)
+            phen_time = None
+            phen_time2 = first_value(g, obs, SOSA.phenomenonTime) or first_value(g, obs, SOSA.phenomenon_time) or first_value(g, obs, SOSA.resultTime)
+            if phen_time2:
+                try:    
+                    dt = datetime.strptime(phen_time2.split('T')[0], "%Y-%m-%d")
+                    phen_time = dt.timestamp()
+                except:
+                    print('can not date parse',phen_time2.split('T')[0])
+            # result text (simple literal)
+            qual_value_text = first_value(g, obs, SOSA.hasSimpleResult)
+            # qualitative value node (may be blank node or URI)
+            qual_node = first_value(g, obs, SOSA.result) or first_value(g, obs, SOSA.hasResult)
+            qual_uri = None
+            qual_label = None
+            qual_value_text = None
+            if qual_node is not None:
+                # if it's a node (URIRef/BNode), create stable id
+                qual_uri = node_to_uri(qual_node) if not isinstance(qual_node, Literal) else None
+                # label or text
+                qual_label = label_for(g, qual_node) if qual_uri else str(qual_node)
+                # maybe the observation also has a simple result we should preserve as value_text
+                qual_value_text = first_value(g, qual_node, QUDT.numericValue) or first_value(g, qual_node, QUDT.quantityValue) 
+                # unit (might be linked via qudt or as property on observation)
+                unit_node = first_value(g, qual_node, QUDT.unit) or first_value(g, obs, QUDT.unit)
+                unit_uri = node_to_uri(unit_node) if unit_node is not None else None
+                unit_label = label_for(g, unit_node) if unit_node is not None else None
+            # procedure
+            proc_node = first_value(g, obs, SOSA.usedProcedure) or first_value(g, obs, SOSA.isProducedBy)
+            proc_uri = node_to_uri(proc_node) if proc_node is not None else None
+            proc_label = label_for(g, proc_node) if proc_node is not None else None
+            # observed property
+            prop_node = first_value(g, obs, SOSA.observedProperty) or first_value(g, obs, SOSA.hasObservedProperty)
+            prop_uri = node_to_uri(prop_node) if prop_node is not None else None
+            prop_label = label_for(g, prop_node) if prop_node is not None else None
+            # feature of interest
+            foi_node = first_value(g, obs, SOSA.hasFeatureOfInterest) or first_value(g, obs, SOSA.featureOfInterest)
+            foi_uri = node_to_uri(foi_node) if foi_node is not None else None
+            foi_label = label_for(g, foi_node) if foi_node is not None else None
+            foi_type = types_text_for(g, foi_node)
+            # geometry text
+            # geom_text = get_geometry_text(g, foi_node) if foi_node is not None else None
 
-    dbpath = f"export{random.random()}.sqlite"
-    shutil.copyfile("./iso28258.sqlite", dbpath)
-    database = "export.sqlite"
+            # Upsert referenced entities and get ids
+            proc_id = upsert_single_return_id(cur,"procedure", proc_uri, proc_label)
+            unit_id = upsert_single_return_id(cur,"unitofmeasure", unit_uri, unit_label)
+            prop_id = upsert_single_return_id(cur,"property", prop_uri, prop_label)
+            foi_id = upsert_single_return_id(cur,"feature_of_interest", foi_uri, foi_type)
+            if qual_value_text not in [None, '']:
+                UPSERT_RES = f"INSERT INTO result (result_uri,value,unit_of_measure_id) VALUES (?, ?, ?)"
+                cur.execute(UPSERT_RES,(qual_uri,qual_value_text,unit_id))
 
-    with sqlite3.connect(database) as conn:
-        cur = conn.cursor()
-
-        if 1==1: # try:
-            # iterate over explicit observation subjects
-            obs_count = 0
-            for obs in g.subjects(RDF.type, SOSA.Observation):
-                obs_count += 1
-                obs_uri = node_to_uri(obs)
-                # Phenomenon time (literal)
-                phen_time = None
-                phen_time2 = first_value(g, obs, SOSA.phenomenonTime) or first_value(g, obs, SOSA.phenomenon_time) or first_value(g, obs, SOSA.resultTime)
-                if phen_time2:
-                    try:    
-                        dt = datetime.strptime(phen_time2.split('T')[0], "%Y-%m-%d")
-                        phen_time = dt.timestamp()
-                    except:
-                        print('can not date parse',phen_time2.split('T')[0])
-                # result text (simple literal)
-                qual_value_text = first_value(g, obs, SOSA.hasSimpleResult)
-                # qualitative value node (may be blank node or URI)
-                qual_node = first_value(g, obs, SOSA.result) or first_value(g, obs, SOSA.hasResult)
-                qual_uri = None
-                qual_label = None
-                qual_value_text = None
-                if qual_node is not None:
-                    # if it's a node (URIRef/BNode), create stable id
-                    qual_uri = node_to_uri(qual_node) if not isinstance(qual_node, Literal) else None
-                    # label or text
-                    qual_label = label_for(g, qual_node) if qual_uri else str(qual_node)
-                    # maybe the observation also has a simple result we should preserve as value_text
-                    qual_value_text = first_value(g, qual_node, QUDT.numericValue) or first_value(g, qual_node, QUDT.quantityValue) 
-                    # unit (might be linked via qudt or as property on observation)
-                    unit_node = first_value(g, qual_node, QUDT.unit) or first_value(g, obs, QUDT.unit)
-                    unit_uri = node_to_uri(unit_node) if unit_node is not None else None
-                    unit_label = label_for(g, unit_node) if unit_node is not None else None
-                # procedure
-                proc_node = first_value(g, obs, SOSA.usedProcedure) or first_value(g, obs, SOSA.isProducedBy)
-                proc_uri = node_to_uri(proc_node) if proc_node is not None else None
-                proc_label = label_for(g, proc_node) if proc_node is not None else None
-                # observed property
-                prop_node = first_value(g, obs, SOSA.observedProperty) or first_value(g, obs, SOSA.hasObservedProperty)
-                prop_uri = node_to_uri(prop_node) if prop_node is not None else None
-                prop_label = label_for(g, prop_node) if prop_node is not None else None
-                # feature of interest
-                foi_node = first_value(g, obs, SOSA.hasFeatureOfInterest) or first_value(g, obs, SOSA.featureOfInterest)
-                foi_uri = node_to_uri(foi_node) if foi_node is not None else None
-                foi_label = label_for(g, foi_node) if foi_node is not None else None
-                foi_type = types_text_for(g, foi_node)
-                # geometry text
-                # geom_text = get_geometry_text(g, foi_node) if foi_node is not None else None
-
-                # Upsert referenced entities and get ids
-                proc_id = upsert_single_return_id(cur,"procedure", proc_uri, proc_label)
-                unit_id = upsert_single_return_id(cur,"unitofmeasure", unit_uri, unit_label)
-                prop_id = upsert_single_return_id(cur,"property", prop_uri, prop_label)
-                foi_id = upsert_single_return_id(cur,"feature_of_interest", foi_uri, foi_type)
-                if qual_value_text not in [None, '']:
-                    UPSERT_RES = f"INSERT INTO result (result_uri,value,unit_of_measure_id) VALUES (?, ?, ?)"
-                    cur.execute(UPSERT_RES,(qual_uri,qual_value_text,unit_id))
-
-                UPSERT_OBS = """
-                INSERT INTO observation (observation_uri, result_uri, phenomenon_time, procedure_id, property_id, foi_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """
-                cur.execute(UPSERT_OBS,(obs_uri, qual_uri, phen_time, proc_id, prop_id, foi_id))
-                
-            conn.commit()
-            print("Data loaded")
-        #except Exception as e:
-        #    print('error',e)
-        #finally: 
-            cur.close()
-            return dbpath
+            UPSERT_OBS = """
+            INSERT INTO observation (observation_uri, result_uri, phenomenon_time, procedure_id, property_id, foi_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+            cur.execute(UPSERT_OBS,(obs_uri, qual_uri, phen_time, proc_id, prop_id, foi_id))
+            
+        conn.commit()
+        print("Data loaded")
+    #except Exception as e:
+    #    print('error',e)
+    #finally: 
+        cur.close()
+        return conn
 
     
 
