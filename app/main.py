@@ -1,5 +1,6 @@
 # app/main.py
 from fastapi import FastAPI, HTTPException, Body
+import tempfile
 from fastapi.responses import FileResponse, Response, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -573,14 +574,18 @@ async def convert_to_rdf(req: ConvertRequest = Body(...)):
         # --- BEGIN: Enhanced SQLite export with SOSA mapping ---
         if fmt == "sqlite" or fmt == "gpkg":
             db = rdf2rdb(graph)
-            db_bytes = io.BytesIO()
-            for line in db.iterdump():  # iterdump gives SQL statements to recreate DB
-                db_bytes.write(f"{line}\n".encode())
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+            file_conn = sqlite3.connect(tmp.name)
+            db.backup(file_conn)
+            file_conn.close()
             db.close()
-            db_bytes.seek(0)
-
-            return Response(content=db_bytes.getvalue(), media_type="application/sqlite",
-                            headers={"Content-Disposition": "attachment; filename=export.db"})
+            return StreamingResponse(
+                open(tmp.name, "rb"),
+                media_type="application/vnd.sqlite3",
+                headers={
+                    "Content-Disposition": "attachment; filename=export.db"
+                }
+            )
     else:
         raise HTTPException(status_code=500, detail=f"Parsing error")
 
@@ -671,7 +676,7 @@ def upsert_single_return_id(cur, table, uri, label=None, extra_col=None, extra_v
         cur.execute(sql_ins, (uri, label, extra_val))
     else:
         cur.execute(f"INSERT OR IGNORE INTO {table} (uri, label) VALUES (?, ?)", (uri, label))
-    cur.execute(f"SELECT {table}_id FROM {table} WHERE uri = ?", (uri,))
+    cur.execute(f"SELECT uri FROM {table} WHERE uri = ?", (uri,))
     row = cur.fetchone()
     return row[0] if row else None
 
