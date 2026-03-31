@@ -15,6 +15,7 @@ import sqlite3, sys
 import shutil, hashlib, random
 from datetime import datetime
 from csvwlib import CSVWConverter
+from pygeoif import Point
 
 # Namespaces
 SOSA = Namespace("http://www.w3.org/ns/sosa/")
@@ -65,6 +66,19 @@ async def fetch_bytes(url: str, timeout: int = 30) -> bytes:
         r = await client.get(url)
         r.raise_for_status()
         return r.content
+
+import struct
+from pygeoif import Point
+
+def to_gpkg_geom(point, srs_id=4326):
+    # geom_blob = to_gpkg_geom(Point(5.0, 52.0))
+    wkb = point.wkb
+    magic = b"GP" 
+    version = b"\x00"
+    flags = b"\x01"
+    srs = struct.pack("<I", srs_id)
+    header = magic + version + flags + srs
+    return header + wkb
 
 def dataframe_to_rows_and_headers(df: pd.DataFrame) -> (List[str], List[Dict[str,Any]]):
     # ensure columns are strings
@@ -526,6 +540,26 @@ async def suggest(req: URLRequest):
     }
     return {"metadata": metadata, "tables": tables}
 
+@app.post("/graph2gpkg", 
+          summary="Convert a knowledge graph to a geopackage (sqlite)",
+          description="""converts one or more tables to a knowledge graph, from a csvw configuration""")
+async def rdf_to_gpkg(req: str):
+    g = Graph()
+    g.parse(req)  # or .jsonld
+    db = rdf2rdb(g)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    file_conn = sqlite3.connect(tmp.name)
+    db.backup(file_conn)
+    file_conn.close()
+    db.close()
+    return StreamingResponse(
+        open(tmp.name, "rb"),
+        media_type="application/vnd.sqlite3",
+        headers={
+            "Content-Disposition": "attachment; filename=export.db"
+        }
+    )
+
 
 @app.post("/convert", summary="Converts one or more tables to a knowledge graph, from a csvw configuration",
     description="""converts one or more tables to a knowledge graph, from a csvw configuration""")
@@ -665,15 +699,25 @@ def types_text_for(g, node):
     return ",".join(names)
 
 # utility upsert functions returning row id
-def upsert_single_return_id(cur, table, uri, label=None, extra_col=None, extra_val=None):
+def upsert_single_return_id(cur, table, uri, label=None, extra=None):
     """
     Generic insert-or-ignore then select id. If extra_col/extra_val provided, include in insert.
     """
     if uri is None:
         return None
-    if extra_col:
-        sql_ins = f"INSERT OR IGNORE INTO {table} (uri, label, {extra_col}) VALUES (?, ?, ?)"
-        cur.execute(sql_ins, (uri, label, extra_val))
+    if extra:
+        extra_cols = ['?','?']
+        extra_rows = ['uri','label']
+        col_vals =  [uri,label]
+        for k,v in extra.items():
+            extra_cols.append('?')
+            extra_rows.append(k)
+            col_vals.append(v)
+        sql_ins = f"""INSERT OR IGNORE INTO {table} (
+            {','.join(extra_rows)}
+            ) VALUES ({','.join(extra_cols)})"""
+        print('s',sql_ins)
+        cur.execute(sql_ins, tuple(col_vals))
     else:
         cur.execute(f"INSERT OR IGNORE INTO {table} (uri, label) VALUES (?, ?)", (uri, label))
     cur.execute(f"SELECT uri FROM {table} WHERE uri = ?", (uri,))
@@ -685,9 +729,6 @@ def dbinit():
     conn = sqlite3.connect(":memory:")
     cur = conn.cursor()
 
-    # -----------------------------
-    # 1. Create tables
-    # -----------------------------
     cur.execute("""
     CREATE TABLE result (
         result_uri TEXT PRIMARY KEY,
@@ -732,9 +773,90 @@ def dbinit():
     cur.execute("""
     CREATE TABLE feature_of_interest (
         uri TEXT PRIMARY KEY,
-        label TEXT
+        label TEXT,
+        type TEXT,
+        geom BLOB NOT NULL
     )
     """)
+
+    cur.execute("""
+CREATE TABLE gpkg_spatial_ref_sys (
+    srs_name TEXT NOT NULL,
+    srs_id INTEGER NOT NULL PRIMARY KEY,
+    organization TEXT NOT NULL,
+    organization_coordsys_id INTEGER NOT NULL,
+    definition TEXT NOT NULL,
+    description TEXT
+)""")
+
+    cur.execute("""
+CREATE TABLE gpkg_contents (
+    table_name TEXT NOT NULL PRIMARY KEY,
+    data_type TEXT NOT NULL,
+    identifier TEXT UNIQUE,
+    description TEXT DEFAULT '',
+    last_change DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    min_x DOUBLE, min_y DOUBLE,
+    max_x DOUBLE, max_y DOUBLE,
+    srs_id INTEGER,
+    FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+)""")
+
+    cur.execute("""
+CREATE TABLE gpkg_geometry_columns (
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    geometry_type_name TEXT NOT NULL,
+    srs_id INTEGER NOT NULL,
+    z TINYINT NOT NULL,
+    m TINYINT NOT NULL,
+    PRIMARY KEY (table_name, column_name),
+    FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+)""")
+    cur.execute("""
+INSERT INTO gpkg_spatial_ref_sys (
+    srs_name, srs_id, organization, organization_coordsys_id, definition, description
+) VALUES (
+    'WGS 84 geodetic',
+    4326,
+    'EPSG',
+    4326,
+    'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]]]',
+    'longitude/latitude coordinates in decimal degrees'
+)""")
+
+    cur.execute("""
+INSERT INTO gpkg_contents (
+    table_name,
+    data_type,
+    identifier,
+    description,
+    srs_id
+) VALUES (
+    'feature_of_interest',
+    'features',
+    'feature_of_interest',
+    'Feature of interest points',
+    4326
+)""")
+
+    cur.execute("""
+INSERT INTO gpkg_geometry_columns (
+    table_name,
+    column_name,
+    geometry_type_name,
+    srs_id,
+    z,
+    m
+) VALUES (
+    'feature_of_interest',
+    'geom',
+    'POINT',
+    4326,
+    0,
+    0
+)""")
+
     return conn
 
 # get sqlite for rdf
@@ -789,13 +911,20 @@ def rdf2rdb(g, RDF_FORMAT='turtle'): # "xml", "nt", "json-ld" etc.
             foi_label = label_for(g, foi_node) if foi_node is not None else None
             foi_type = types_text_for(g, foi_node)
             # geometry text
-            # geom_text = get_geometry_text(g, foi_node) if foi_node is not None else None
+            lat = first_value(g, foi_node, GEO.lat)
+            lon = first_value(g, foi_node, GEO.long)
+            geom = None
+            if lat and lon:
+                lat = float(lat)
+                lon = float(lon)
+                geom = to_gpkg_geom(lat, lon)
+            foi_id = upsert_single_return_id(cur, "feature_of_interest", foi_uri, foi_label, 
+                                             {"type":foi_type, "geom": geom})
 
             # Upsert referenced entities and get ids
             proc_id = upsert_single_return_id(cur,"procedure", proc_uri, proc_label)
             unit_id = upsert_single_return_id(cur,"unitofmeasure", unit_uri, unit_label)
             prop_id = upsert_single_return_id(cur,"property", prop_uri, prop_label)
-            foi_id = upsert_single_return_id(cur,"feature_of_interest", foi_uri, foi_type)
             if qual_value_text not in [None, '']:
                 UPSERT_RES = f"INSERT INTO result (result_uri,value,unit_of_measure_id) VALUES (?, ?, ?)"
                 cur.execute(UPSERT_RES,(qual_uri,qual_value_text,unit_id))

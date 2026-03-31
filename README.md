@@ -9,15 +9,13 @@ The metadata can live with the data in repositories (suc as zenodo.org), or be m
 
 ## API methods
 
-**convert**: converts one or more tables to a knowledge graph, from a csvw configuration
+**convert**: converts one or more tables to a knowledge graph or a geopackage (sqlite)
+
+**graph2gpkg**: converts a knowledge graph to a geopackage (sqlite)
 
 **suggest**: suggests a csvw configuration from one or more tables
 
 **export**: exports the tables and csvw configuration of a project as a zipfile
-
-
-
-
 
 ## Run in a local python environment
 
