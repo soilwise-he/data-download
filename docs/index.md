@@ -1,6 +1,6 @@
-# soil data streamer
+# Soil data streamer
 
-a component which facilitates harmonised data downloads from enriched tabular formats
+A component which facilitates harmonised data downloads from enriched tabular formats
 
 those tabular formats (in repositories such as zenodo) which are enriched with a [CSV-W](https://csvw.org) context metadata, 
 can be converted through this service as rdf (ttl, xml, json-ld) or Geopackage (sqlite) 

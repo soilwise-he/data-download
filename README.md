@@ -9,13 +9,15 @@ The metadata can live with the data in repositories (suc as zenodo.org), or be m
 
 ## API methods
 
-**convert**: converts one or more tables to a knowledge graph or a geopackage (sqlite)
+**convert**: converts one or more tables to a [SOSA](https://www.w3.org/TR/vocab-ssn/) or [schema.org](https://schema.org/Observation) based knowledge graph, a [Soil geopackage](https://github.com/ejpsoil/inspire_soil_gpkg_template) (sqlite) or [INSPIRE Soil GML](https://inspire-mif.github.io/technical-guidelines/data/so/dataspecification_so.pdf)
 
-**graph2gpkg**: converts a knowledge graph to a geopackage (sqlite)
+**graph2gpkg**: converts a [SOSA](https://www.w3.org/TR/vocab-ssn/) or [schema.org](https://schema.org/Observation) based knowledge graph to a [Soil geopackage](https://github.com/ejpsoil/inspire_soil_gpkg_template) (sqlite) or [INSPIRE Soil GML](https://inspire-mif.github.io/technical-guidelines/data/so/dataspecification_so.pdf)
 
-**suggest**: suggests a csvw configuration from one or more tables
+**suggest**: suggests a [SOSA](https://www.w3.org/TR/vocab-ssn/) or [schema.org](https://schema.org/Observation) based csvw configuration from one or more tables
 
-**export**: exports the tables and csvw configuration of a project as a zipfile
+**import**: imports a metadata format and converts to csvw, supported metadata formats are [datapackage tableschema](https://datapackage.org/standard/table-schema/), [metadata control file](https://geopython.github.io/pygeometa/reference/mcf/) and [Soilwise metadata csv](#soilwise-metadata-csv)
+
+**export**: exports the tables and csvw configuration of a project as a zipfile, which you can deposit as-is on a repository like [Zenodo](https://zenodo.org)
 
 ## Run in a local python environment
 
@@ -41,8 +43,14 @@ However you can enable storage of metadata on a database, provide postgres conne
 
 ```
 pip install -r requirements.txt
-pytest test
+PYTHONPATH=. pytest tests
 ```
+
+## Soilwise Metadata CSV
+
+The Soilwise metadata CSV format is a CSV format, where each row represents a column in the dataset which is described by the CSV. The fields in each row are the properties of each dataset column: observed property, unit of measure, observation procedure, field type.
+
+A Excel template is available, which can be used to easily create this format.
 
 ## Soilwise HE project
 
