@@ -62,7 +62,7 @@ def build_inspire_gml(conn):
         f.geom
 
     FROM observation o
-    LEFT JOIN result r ON r.result_uri = o.result_uri
+    LEFT JOIN result r ON r.id = o.result_id
     LEFT JOIN feature_of_interest f ON f.uri = o.foi_id
     """)
 
@@ -92,12 +92,12 @@ def build_inspire_gml(conn):
         # observedProperty
         if prop_id:
             prop = etree.SubElement(om_obs, f"{{{OM}}}observedProperty")
-            prop.set(f"{{{XLINK}}}href", prop_id)
+            prop.set(f"{{{XLINK}}}href", str(prop_id))
 
         # procedure
         if proc_id:
             proc = etree.SubElement(om_obs, f"{{{OM}}}procedure")
-            proc.set(f"{{{XLINK}}}href", proc_id)
+            proc.set(f"{{{XLINK}}}href", str(proc_id))
 
         # result
         if value is not None:

@@ -275,7 +275,10 @@ async def suggest(url: str="https://raw.githubusercontent.com/soilwise-he/soil-o
           description="""converts one or more tables to a knowledge graph, from a csvw configuration""")
 async def rdf_to_gpkg(req: str="https://raw.githubusercontent.com/soilwise-he/soil-observation-data-encodings/refs/heads/main/CSVW/examples/example3/data.ttl"):
     g = Graph()
-    g.parse(req)  # or .jsonld
+    if req.startswith("http"):
+        g.parse(req)
+    else:
+        g.parse(data=req)  # or .jsonld
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
     file_conn = sqlite3.connect(tmp.name)
     rdf2rdb(g, file_conn)
@@ -292,7 +295,7 @@ async def rdf_to_gpkg(req: str="https://raw.githubusercontent.com/soilwise-he/so
 @app.post("/convert", summary="Converts one or more tables to a knowledge graph, from a csvw configuration",
     description="""converts one or more tables to a knowledge graph, from a csvw configuration""")
 async def convert_to_rdf(
-        context: str = "https://raw.githubusercontent.com/soilwise-he/soil-observation-data-encodings/refs/heads/main/CSVW/examples/example3/obs.csv-metadata.json",
+        context: str | dict = "https://raw.githubusercontent.com/soilwise-he/soil-observation-data-encodings/refs/heads/main/CSVW/examples/example3/obs.csv-metadata.json",
         data: Optional[List[str]] = [],
         output_format: Optional[Formats] = Formats.ttl
         ):
@@ -305,7 +308,8 @@ async def convert_to_rdf(
     # 0) get context
     if isinstance(context, dict):
         print('got context as dict', context)
-    if isinstance(context, str) and not context.startswith("http"):       
+    if isinstance(context, str) and not context.startswith("http"):  
+        print('context as string', context)     
         try:
             context = json.loads(context)
         except Exception as ex:

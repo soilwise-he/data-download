@@ -5,6 +5,7 @@
 #  innovation programme under grant agreement No 101056973.
 # ----------------------------------------------------------------------------
 
+from cProfile import label
 import datetime
 
 from rdflib import Graph, Namespace, BNode, URIRef, Literal
@@ -36,23 +37,25 @@ def dbinit(conn):
     # Create an in-memory SQLite database
     # initialise with various tables, also geopackage related
     cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE result (
-        result_uri TEXT PRIMARY KEY,
-        value REAL,
-        unit_of_measure_id TEXT
-    )
-    """)
 
     cur.execute("""
     CREATE TABLE observation (
         observation_uri TEXT PRIMARY KEY,
-        result_uri TEXT,
+        result_id INTEGER,
         phenomenon_time TEXT,
-        procedure_id TEXT,
-        property_id TEXT,
-        foi_id TEXT,
-        FOREIGN KEY(result_uri) REFERENCES result(result_uri)
+        procedure_id INTEGER,
+        property_id INTEGER,
+        foi_id INTEGER,
+        FOREIGN KEY(result_id) REFERENCES result(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE result (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_uri TEXT,
+        value REAL,
+        unit_of_measure_id TEXT
     )
     """)
 
@@ -244,17 +247,22 @@ def rdf2rdb(g, conn):
         proc_id = upsert_single_return_id(conn, "procedure", proc_uri, proc_label)
         unit_id = upsert_single_return_id(conn, "unitofmeasure", unit_uri, unit_label)
         prop_id = upsert_single_return_id(conn, "property", prop_uri, prop_label)
-        if qual_value_text not in [None, '']:
+        res_id = None
+        if qual_value_text not in [None, '']:  # todo: value may not be integer, also check for literal value on observation
             UPSERT_RES = f"INSERT INTO result (result_uri,value,unit_of_measure_id) VALUES (?, ?, ?)"
             with get_cursor(conn) as cur:
                 cur.execute(UPSERT_RES, (qual_uri, qual_value_text, unit_id))
-
+                cur.execute(f"""
+                    SELECT id FROM result WHERE result_uri = ?""", 
+                    (qual_uri,))
+                row = cur.fetchone()
+                res_id = row[0] if row else None
         UPSERT_OBS = """
-        INSERT INTO observation (observation_uri, result_uri, phenomenon_time, procedure_id, property_id, foi_id)
+        INSERT INTO observation (observation_uri, result_id, phenomenon_time, procedure_id, property_id, foi_id)
         VALUES (?, ?, ?, ?, ?, ?)
         """
         with get_cursor(conn) as cur:
-            cur.execute(UPSERT_OBS,(obs_uri, qual_uri, phen_time, proc_id, prop_id, foi_id))
+            cur.execute(UPSERT_OBS,(obs_uri, res_id, phen_time, proc_id, prop_id, foi_id))
 
     conn.commit()
 

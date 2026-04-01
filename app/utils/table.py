@@ -5,6 +5,7 @@
 #  innovation programme under grant agreement No 101056973.
 # ----------------------------------------------------------------------------
 
+from random import sample
 from typing import List, Any, Dict, Optional, Union
 import httpx, json, io
 import pandas as pd
@@ -161,6 +162,22 @@ def pick_primary_key(headers: List[str], rows_sample: List[Dict[str,Any]]) -> Op
         return pick_by_hint(perfect) or perfect[0][0]
     return None
 
+def parse_csv(csv_text: str) -> (List[str], List[Dict[str,Any]]):
+    csv_text = csv_text.strip()
+    # Use Sniffer to detect the delimiter
+    dialect = csv.Sniffer().sniff(csv_text)
+    hasheader = csv.Sniffer().has_header(csv_text)
+    # Use the detected dialect
+    reader = csv.DictReader(StringIO(csv_text), dialect=dialect)
+    if hasheader:
+        headers = reader.fieldnames or []
+    else:
+        first_row = next(reader, [])
+        headers = [f"col{i+1}" for i in range(len(first_row))]
+        reader = csv.DictReader(StringIO(csv_text), fieldnames=headers, dialect=dialect)
+    rows = list(reader)
+    return headers, rows
+
 # -----------------------
 # Core parsing logic
 # -----------------------
@@ -177,10 +194,7 @@ async def parse_excel_or_csv_from_url(url: str) -> List[Dict]:
     if (not is_excel_ext) and content[:4] != b'PK\x03\x04':
         # treat as CSV text
         text = content.decode("utf-8", errors="replace")
-        parsed = list(csv.DictReader(StringIO(text)))
-        headers = parsed[0].keys() if parsed else []
-        headers = [str(h) for h in headers]
-        rows = parsed
+        headers, rows = parse_csv(text)
         csv_text = text
         return [{
             "url": url,
