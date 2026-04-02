@@ -26,9 +26,9 @@ async def test_export_db_has_records():
     cur.execute("SELECT COUNT(*) FROM observation")
     count1 = cur.fetchone()[0]
     assert count1 > 0
-#    cur.execute("SELECT COUNT(*) FROM result")
-#    count2 = cur.fetchone()[0]
-#    assert count2 > 0
+    cur.execute("SELECT COUNT(*) FROM result") # todo: result is not inserted yet??
+    count2 = cur.fetchone()[0]
+    assert count2 > 0
     conn.close()
 
 @pytest.mark.asyncio

@@ -34,7 +34,7 @@ def first_value(g, subject, predicate):
         return None
     # For rdflib LITERAL / URIRef return python value appropriately
     if isinstance(v, Literal):
-        return str(v)
+        return v.toPython() 
     return v  # keep URIRef or BNode for further lookup
 
 def label_for(g, node):

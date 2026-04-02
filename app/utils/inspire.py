@@ -103,7 +103,7 @@ def build_inspire_gml(conn):
         if value is not None:
             res = etree.SubElement(om_obs, f"{{{OM}}}result")
             if uom:
-                res.set("uom", uom)
+                res.set("uom", str(uom))
             res.text = str(value)
 
         # featureOfInterest (OPTIONAL)

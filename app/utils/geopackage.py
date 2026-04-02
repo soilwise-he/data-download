@@ -7,6 +7,7 @@
 
 from cProfile import label
 import datetime
+from platform import node
 
 from rdflib import Graph, Namespace, BNode, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, SKOS, DCTERMS
@@ -30,15 +31,13 @@ def get_cursor(conn):
 SOSA = Namespace("http://www.w3.org/ns/sosa/")
 GEO  = Namespace("http://www.opengis.net/ont/geosparql#")
 WGS  = Namespace("http://www.w3.org/2003/01/geo/wgs84_pos#")
-QUDT = Namespace("http://qudt.org/schema/qudt/")
+QUDT = Namespace("http://qudt.org/1.1/schema/qudt#")
 
 
 def dbinit(conn):
     # Create an in-memory SQLite database
     # initialise with various tables, also geopackage related
-    cur = conn.cursor()
-
-    cur.execute("""
+    qrys = """
     CREATE TABLE observation (
         observation_uri TEXT PRIMARY KEY,
         result_id INTEGER,
@@ -47,53 +46,39 @@ def dbinit(conn):
         property_id INTEGER,
         foi_id INTEGER,
         FOREIGN KEY(result_id) REFERENCES result(id)
-    )
-    """)
-
-    cur.execute("""
+    );
     CREATE TABLE result (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         result_uri TEXT,
-        value REAL,
-        unit_of_measure_id TEXT
-    )
-    """)
-
-    cur.execute("""
+        value TEXT,
+        unit_of_measure_id INTEGER
+    );
     CREATE TABLE procedure (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uri TEXT,
         label TEXT
-    )
-    """)
-
-    cur.execute("""
+    );
+    CREATE UNIQUE INDEX i_u_proc ON procedure(uri,label);
     CREATE TABLE unitofmeasure (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uri TEXT,
         label TEXT
-    )
-    """)
-
-    cur.execute("""
+    );
+    CREATE UNIQUE INDEX i_u_unit ON unitofmeasure(uri,label);
     CREATE TABLE property (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uri TEXT,
         label TEXT
-    )
-    """)
-
-    cur.execute("""
+    );
+    CREATE UNIQUE INDEX i_u_prop ON property(uri,label);
     CREATE TABLE feature_of_interest (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uri TEXT,
         label TEXT,
         type TEXT,
         geom BLOB NOT NULL
-    )
-    """)
-
-    cur.execute("""
+    );
+CREATE UNIQUE INDEX i_u_foi ON feature_of_interest(uri,label);
 CREATE TABLE gpkg_spatial_ref_sys (
     srs_name TEXT NOT NULL,
     srs_id INTEGER NOT NULL PRIMARY KEY,
@@ -101,9 +86,7 @@ CREATE TABLE gpkg_spatial_ref_sys (
     organization_coordsys_id INTEGER NOT NULL,
     definition TEXT NOT NULL,
     description TEXT
-)""")
-
-    cur.execute("""
+);
 CREATE TABLE gpkg_contents (
     table_name TEXT NOT NULL PRIMARY KEY,
     data_type TEXT NOT NULL,
@@ -114,9 +97,7 @@ CREATE TABLE gpkg_contents (
     max_x DOUBLE, max_y DOUBLE,
     srs_id INTEGER,
     FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
-)""")
-
-    cur.execute("""
+);
 CREATE TABLE gpkg_geometry_columns (
     table_name TEXT NOT NULL,
     column_name TEXT NOT NULL,
@@ -126,8 +107,7 @@ CREATE TABLE gpkg_geometry_columns (
     m TINYINT NOT NULL,
     PRIMARY KEY (table_name, column_name),
     FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
-)""")
-    cur.execute("""
+);
 INSERT INTO gpkg_spatial_ref_sys (
     srs_name, srs_id, organization, organization_coordsys_id, definition, description
 ) VALUES (
@@ -137,9 +117,7 @@ INSERT INTO gpkg_spatial_ref_sys (
     4326,
     'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]]]',
     'longitude/latitude coordinates in decimal degrees'
-)""")
-
-    cur.execute("""
+);
 INSERT INTO gpkg_contents (
     table_name,
     data_type,
@@ -152,9 +130,7 @@ INSERT INTO gpkg_contents (
     'feature_of_interest',
     'Feature of interest points',
     4326
-)""")
-
-    cur.execute("""
+);
 INSERT INTO gpkg_geometry_columns (
     table_name,
     column_name,
@@ -169,8 +145,11 @@ INSERT INTO gpkg_geometry_columns (
     4326,
     0,
     0
-)""")
-
+)"""
+    cur = conn.cursor()
+    for q in qrys.split(';'):
+        cur.execute(q)
+    conn.commit()
 
 
 def to_gpkg_geom(point, srs_id=4326):
@@ -214,7 +193,7 @@ def rdf2rdb(g, conn):
             # maybe the observation also has a simple result we should preserve as value_text
             qual_value_text = first_value(
                 g, qual_node, QUDT.numericValue) or first_value(
-                g, qual_node, QUDT.value)                
+                g, qual_node, QUDT.value)             
             # unit (might be linked via qudt or as property on observation)
             unit_node = first_value(g, qual_node, QUDT.unit) or first_value(g, qual_node, QUDT.hasUnit)
             unit_uri = node_to_uri(unit_node) if unit_node is not None else None
