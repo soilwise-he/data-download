@@ -48,22 +48,26 @@ def build_inspire_gml(conn):
 
     cur.execute("""
     SELECT
-        o.observation_uri,
-        o.phenomenon_time,
-        o.procedure_id,
-        o.property_id,
-        o.foi_id,
-
+        o.observation_uri as obs_uri,
+        o.phenomenon_time as phen_time,
         r.value,
-        r.unit_of_measure_id,
-
-        f.uri,
-        f.label,
-        f.geom
+        r.result_uri,
+        proc.uri as proc_uri,
+        proc.label as proc_label,
+        prop.uri as prop_uri,
+        prop.label as prop_label,
+        uom.uri as uom_uri,
+        uom.label as uom_label,
+        foi.uri as foi_uri,
+        foi.label as foi_label,
+        foi.geom as geom_blob
 
     FROM observation o
-    LEFT JOIN result r ON r.id = o.result_id
-    LEFT JOIN feature_of_interest f ON f.uri = o.foi_id
+        LEFT JOIN procedure proc ON proc.id = o.procedure_id
+        LEFT JOIN property prop ON prop.id = o.property_id            
+        LEFT JOIN result r ON r.id = o.result_id
+        LEFT JOIN unitofmeasure uom ON uom.id = r.unit_of_measure_id
+        LEFT JOIN feature_of_interest foi ON foi.uri = o.foi_id
     """)
 
     rows = cur.fetchall()
@@ -72,9 +76,10 @@ def build_inspire_gml(conn):
 
     for row in rows:
         (
-            obs_uri, phen_time, proc_id, prop_id, foi_id,
-            value, uom,
-            foi_uri, foi_label, geom_blob
+            obs_uri, phen_time, value, result_uri,
+            proc_uri, proc_label, prop_uri,
+            prop_label, uom_uri, uom_label, foi_uri,
+            foi_label, geom_blob
         ) = row
 
         member = etree.SubElement(root, f"{{{GML}}}featureMember")
@@ -90,28 +95,28 @@ def build_inspire_gml(conn):
             tp.text = phen_time
 
         # observedProperty
-        if prop_id:
+        if prop_uri or prop_label:
             prop = etree.SubElement(om_obs, f"{{{OM}}}observedProperty")
-            prop.set(f"{{{XLINK}}}href", str(prop_id))
+            prop.set(f"{{{XLINK}}}href", str(prop_uri) if prop_uri else ('#' + safe_id(prop_label)))
 
         # procedure
-        if proc_id:
+        if proc_uri or proc_label:
             proc = etree.SubElement(om_obs, f"{{{OM}}}procedure")
-            proc.set(f"{{{XLINK}}}href", str(proc_id))
+            proc.set(f"{{{XLINK}}}href", str(proc_uri) if proc_uri else ('#' + safe_id(proc_label)))
 
         # result
         if value is not None:
             res = etree.SubElement(om_obs, f"{{{OM}}}result")
-            if uom:
-                res.set("uom", str(uom))
+            if uom_uri or uom_label:
+                res.set("uom", str(uom_uri or ('#' + safe_id(uom_label))))
             res.text = str(value)
 
         # featureOfInterest (OPTIONAL)
-        if foi_uri:
+        if foi_uri or foi_label or geom_blob:
             foi_el = etree.SubElement(om_obs, f"{{{OM}}}featureOfInterest")
 
             soil = etree.SubElement(foi_el, f"{{{SO}}}SoilBody")
-            soil.set(f"{{{GML}}}id", safe_id(foi_uri))
+            soil.set(f"{{{GML}}}id", safe_id(foi_uri or foi_label or str(obs_uri) + "_foi"))
 
             if foi_label:
                 name = etree.SubElement(soil, f"{{{GML}}}name")
