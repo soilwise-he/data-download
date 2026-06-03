@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csvw-api"
+version = "0.1.0"
+description = "A package to run data conversions for soil observation data using CSVW and related technologies."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+authors = [
+    { name = "Paul van Genuchten", email = "genuchten@yahoo.com" }
+]
+
+maintainers = [
+    { name = "Paul van Genuchten", email = "genuchten@yahoo.com" }
+]
+
+keywords = [
+    "python",
+    "csvw",
+    "soil"
+]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.35",
+    "httpx>=0.28",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "python-dateutil>=2.9",
+    "rdflib>=7.1",
+    "csvwlib @ git+https://github.com/pvgenuchten/csvwlib.git@latest",
+    "pygeoif>=1.5",
+    "lxml>=5.3",
+    "psycopg2-binary",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/soilwise-he/data-download"
+Repository = "https://github.com/soilwise-he/data-download"
+Issues = "https://github.com/soilwise-he/data-download/issues"
+Documentation = "https://github.com/soilwise-he"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.package-data]
+csvw_api = ["static/**/*"]
+
+
+

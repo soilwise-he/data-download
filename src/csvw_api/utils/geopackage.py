@@ -13,7 +13,7 @@ from rdflib import Graph, Namespace, BNode, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, SKOS, DCTERMS
 from dateutil.parser import parse as dtparse
 import struct
-from app.utils.graph import (
+from csvw_api.utils.graph import (
     first_value, node_to_uri, label_for, types_text_for
 )
 

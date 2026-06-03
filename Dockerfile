@@ -2,11 +2,8 @@
 FROM python:3.14-slim-trixie
 LABEL maintainer="genuchten@yahoo.com"
 
-RUN apt-get update && apt-get install --yes \
-        ca-certificates libexpat1 git \
+RUN apt-get update && apt-get install --yes git \
     && rm -rf /var/lib/apt/lists/*
-
-RUN adduser --uid 1000 --gecos '' --disabled-password sds
 
 ENV ROOTPATH=/
 ENV POSTGRES_HOST=host.docker.internal
@@ -15,26 +12,17 @@ ENV POSTGRES_DB=postgres
 ENV POSTGRES_USER=postgres
 ENV POSTGRES_PASSWORD=*****
 
-WORKDIR /home/soildatastreamer
+WORKDIR /app
 
-RUN chown --recursive sds:sds .
+# Install package metadata first for better layer caching
+COPY pyproject.toml README.md ./
 
-# initially copy only the requirements files
-COPY --chown=sds \
-    requirements.txt \
-    ./
+# Copy source
+COPY src ./src
 
-RUN pip install -U pip && \
-    python3 -m pip install \
-    -r requirements.txt \
-    psycopg2-binary  
-
-COPY --chown=sds . .
-
-WORKDIR /home/soildatastreamer
+# Install the package
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
-USER sds
-
-ENTRYPOINT [ "python3", "-m", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000" ]
+CMD ["uvicorn", "csvw_api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]

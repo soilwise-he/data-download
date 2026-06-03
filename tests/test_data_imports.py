@@ -7,8 +7,8 @@
 
 import sys, os, pytest
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import app.main as main
-from app.utils.table import detect_header_row, parse_excel_or_csv_from_url, parse_csv
+from csvw_api.convert import csvw_from_table
+from csvw_api.utils.table import detect_header_row, parse_excel_or_csv_from_url, parse_csv
 from .constants import csv_sample, csv_tab_sample, csv_noheader_sample
 
 def test_header():
@@ -38,4 +38,13 @@ def test_read_noheader_csv(): # todo allow tab separated as well
 async def test_csv_imports():
     foo = await parse_excel_or_csv_from_url('https://raw.githubusercontent.com/soilwise-he/soil-observation-data-encodings/refs/heads/main/CSVW/examples/example3/obs.csv')
     print(foo[0].get('rows',[])[0])
-    assert foo[0].get('rows',[])[0].get('SAMPLE','') == 'UAI234'
+    assert foo[0].get('rows',[])[0].get('SAMPLE','') in ['US325','TA234','TS325','AIZ34','BS385'] # rdf may have no order
+
+
+# with excel template
+@pytest.mark.asyncio
+async def test_excel_import():
+    foo = await csvw_from_table('https://github.com/soilwise-he/soil-observation-data-encodings/raw/refs/heads/main/SimpleCSV/SoilTemplate.xlsx')
+    # lsprint(foo['metadata'])
+    assert len(foo['metadata']['tables'][0]['tableSchema']['columns']) > 1
+

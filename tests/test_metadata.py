@@ -6,9 +6,9 @@
 # ----------------------------------------------------------------------------
 
 import sys, os, sqlite3
-from app.utils.geopackage import rdf2rdb
-from app.utils.metadata import parse_metadata
-from app.utils.table import fetch_bytes
+from csvw_api.utils.geopackage import rdf2rdb
+from csvw_api.utils.metadata import parse_metadata
+from csvw_api.utils.table import fetch_bytes
 import pytest
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 

@@ -9,7 +9,7 @@ the metadata can live with the data in zenodo, or be made available within the s
 
 ```
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn csvw_api.main:app --reload --port 8000
 ```
 
 A docker image is available

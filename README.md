@@ -22,8 +22,9 @@ The metadata can live with the data in repositories (suc as zenodo.org), or be m
 ## Run in a local python environment
 
 ```
+cd src
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn main:app --reload --port 8000
 ```
 
 ## Run in docker

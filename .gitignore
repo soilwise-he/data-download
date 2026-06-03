@@ -11,3 +11,8 @@
 /.pytest_cache/
 /tests/__pycache__/
 /app/utils/__pycache__/
+
+/.luarc.json
+/src/csvw_api.egg-info/
+/src/csvw_api/__pycache__/
+/src/csvw_api/utils/__pycache__/
